@@ -9,12 +9,14 @@ module FRP.Yampa.Vty (
   Command (..),
 ) where
 
+import Control.Concurrent (threadDelay)
 import Data.Functor (($>))
 import Data.IORef (atomicModifyIORef', newIORef)
+import Data.Int (Int64)
 import FRP.Yampa (DTime, Event (..), SF, event, reactimate)
 import Graphics.Vty (Vty (..))
 import Graphics.Vty qualified as Vty (Event (..), Picture, displayBounds, setWindowTitle)
-import System.Clock (Clock (..), TimeSpec (..), diffTimeSpec, getTime)
+import System.Clock (Clock (..), TimeSpec (..), getTime)
 
 -- | Vty commands
 data Command
@@ -29,10 +31,14 @@ data Command
 runVty ::
   -- | The `Vty` instance to use
   Vty ->
+  -- | Maximum framerate in Hz
+  Word ->
   -- | The signal function to run
   SF (Event Vty.Event) (Event Vty.Picture, Event Command) ->
   IO ()
-runVty vty@Vty {nextEventNonblocking, outputIface, refresh, shutdown, update} sf = do
+runVty vty@Vty {nextEventNonblocking, outputIface, refresh, shutdown, update} fps sf = do
+  let frameLength = round ((1e6 :: Double) / fromIntegral fps)
+
   start <- getTime Monotonic
   clock <- newIORef start
 
@@ -41,7 +47,15 @@ runVty vty@Vty {nextEventNonblocking, outputIface, refresh, shutdown, update} sf
         pure (Event (Vty.EvResize x y))
       pollClock = do
         t' <- getTime Monotonic
-        atomicModifyIORef' clock \t -> (t', toDTime (t `diffTimeSpec` t'))
+        delta <- atomicModifyIORef' clock \t -> (t', (t' - t))
+        let remaining = frameLength - toμs delta
+        if remaining <= 0
+          then pure (toDTime delta)
+          else do
+            threadDelay (fromIntegral remaining)
+            t'' <- getTime Monotonic
+            delta' <- atomicModifyIORef' clock \t -> (t'', (t'' - t))
+            (pure . toDTime) (delta + delta')
       pollInput _ = do
         e <- nextEventNonblocking
         time' <- pollClock
@@ -58,3 +72,6 @@ runVty vty@Vty {nextEventNonblocking, outputIface, refresh, shutdown, update} sf
 
 toDTime :: TimeSpec -> DTime
 toDTime TimeSpec {sec, nsec} = fromIntegral sec + fromIntegral nsec / 1e9
+
+toμs :: TimeSpec -> Int64
+toμs TimeSpec {sec, nsec} = sec * 1e6 + (nsec `div` 1e3)
